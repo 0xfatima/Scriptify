@@ -1,0 +1,13 @@
+customtkinter
+transformers
+torch
+langchain
+sentence-transformers
+faiss-cpu
+pymupdf
+requests
+accelerate
+chromadb
+symspellpy
+python-docx
+docx2pdf
