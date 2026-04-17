@@ -1456,7 +1456,7 @@ class App(ctk.CTk):
 
     def _update_send_enabled(self):
         busy = self._pending_task_id is not None
-        indexing = self._mode in {"Doc Q&A", "Academic"} and self._indexing_inflight > 0
+        indexing = self._mode in {"Doc Q&A",} and self._indexing_inflight > 0
         empty = not self.input.get("1.0", "end-1c").strip()
 
         if busy:
