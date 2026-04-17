@@ -31,11 +31,22 @@ class ChromaPerDocStore:
         if count == 0:
             return []
         actual_k = min(k, count)
-        results = col.query(query_embeddings=[query_embedding], n_results=actual_k)
+        results = col.query(
+            query_embeddings=[query_embedding],
+            n_results=actual_k,
+            include=["documents", "metadatas", "distances"],
+        )
+
         docs = results["documents"][0]
         metas = results["metadatas"][0]
+        dists = results.get("distances", [[]])[0]
         return [
-            {"text": docs[i], "page": metas[i].get("page"), "source": metas[i].get("source")}
+           {
+                "text": docs[i],
+                "page": metas[i].get("page"),
+                "source": metas[i].get("source"),
+                "distance": dists[i] if i < len(dists) else float("inf"),
+            }
             for i in range(len(docs))
         ]
 

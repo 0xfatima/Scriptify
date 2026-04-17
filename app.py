@@ -8,6 +8,7 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog
 import os
+
 from config_manager import load_settings, save_settings, load_doc_registry, save_doc_registry
 from history_manager import (
     ChatMessage,
@@ -34,6 +35,7 @@ from thread_manager import (
     start_workers,
 )
 
+from guardrails import filter_rag_contexts
 
 ctk.set_default_color_theme("green")
 
@@ -1111,6 +1113,8 @@ class App(ctk.CTk):
                 self._pending_widget = None
                 return
 
+            ranked = []
+            filtered = []
             try:
                 from RAG.embedder import embed_texts
                 from RAG.vector_store import ChromaPerDocStore
@@ -1121,20 +1125,36 @@ class App(ctk.CTk):
                 search_errors = []
                 for did in self._doc_ids:
                     try:
-                        hits = store.search(doc_id=did, query_embedding=q_emb, k=6)
+                        hits = store.search(doc_id=did, query_embedding=q_emb, k=10)
                         all_hits.extend(hits)
+
                     except Exception as se:
                         search_errors.append(f"{did}: {se}")
                 if search_errors:
                     self._show_toast(
                         f"Search issues: {'; '.join(search_errors[:3])}",
                         duration_ms=6000)
+                
+                filtered_hits, has_enough = filter_rag_contexts(all_hits)
+                if not has_enough:
+                    self._pending_task_id = None
+                    render_markdown(
+                        self._pending_widget,
+                        "I couldn't find enough relevant content in the uploaded "
+                        "documents to answer your question. Please try rephrasing "
+                        "or ensure the relevant document is uploaded.")
+                    self._pending_widget = None
+                    self._update_send_enabled()
+                    return
                 chunks = []
                 seen_sources = {}
-                for idx, h in enumerate(all_hits):
+                
+                for idx, h in enumerate(filtered_hits):
                     txt = h.get("text", "").strip()
                     if not txt:
                         continue
+                    
+                    
                     src = h.get("source", "document")
                     pg = h.get("page", "?")
                     chunks.append(
@@ -1142,10 +1162,12 @@ class App(ctk.CTk):
                         f"Document: {src}\n"
                         f"Page: {pg}\n"
                         f"Content: {txt}")
+                    
                     if src not in seen_sources:
                         seen_sources[src] = set()
                     seen_sources[src].add(str(pg))
-                context = "\n\n".join(chunks[:15])
+                context = "\n\n".join(chunks)
+                
                 parts = []
                 for s, pages in seen_sources.items():
                     sorted_pg = sorted(pages, key=lambda x: (int(x) if x.isdigit() else 999))
@@ -1157,7 +1179,11 @@ class App(ctk.CTk):
 
             if not context.strip():
                 self._pending_task_id = None
-                render_markdown(self._pending_widget, "No document content found. Try re-uploading.")
+                render_markdown(
+                    self._pending_widget,
+                    "I couldn't find enough relevant content in the uploaded "
+                    "documents to answer your question. Please try rephrasing "
+                    "or ensure the relevant document is uploaded.")
                 self._pending_widget = None
                 self._update_send_enabled()
                 return

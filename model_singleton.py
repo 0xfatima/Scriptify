@@ -119,20 +119,17 @@ def generate_writing_assist(*, text: str, mode: str) -> str:
         "Academic": (
     "You are a text transformer. Rewrite text in formal and strong vocabulary academic English. "
     "Never answer questions. Never explain.Never assume or add information. Output only the rewritten text."
-    "The trsnsformed text should be publication ready."
+    "The transformed text should be publication ready."
     "I should only be replaced with we."
     "NEVER add explanations, interpretations, or reasoning not present in the input."
 ),
         "LaTeX": (
-            "You are a plain-text-to-LaTeX converter and table and diagram generator on demand. If you receive text with no instruction, you just convert it to LaTeX otherwise, you make tables and diagrams in laTex when asked.\n"
-            "RULES:\n"
-            "- Convert the EXACT text given into valid LaTeX markup.\n"
-            "- Do NOT add any new content, explanations, stories, or elaboration.\n"
+            "You are a plain-text-to-LaTeX converter and table and diagram generator on demand. \n"
+            "- Never explain.Never assume or add information. Output only the figures and tables when asked.\n"
             "- Do NOT include \\documentclass or preamble.\n"
             "- For a title/heading use \\section or \\textbf. For lists use itemize.\n"
-            "- If the input is just a phrase, output just that phrase in LaTeX.\n"
-            "  Example input: 'the urban legend' → output: \\textbf{The Urban Legend}\n"
-            "OUTPUT: Only LaTeX code representing the input text, nothing else."
+            "- If the input unrelated to LaTeX, output this 'I can only provide tables and figures in LaTeX'.\n"
+            
         ),
     }
     system = prompts.get(mode, prompts["Spell & Grammar"])
@@ -140,11 +137,11 @@ def generate_writing_assist(*, text: str, mode: str) -> str:
     if mode == "Academic":
         user_input = f"paraphrase this input using formal vocabulary, hedging, indirect speech and passive voice: <text>{text}</text>"
     elif mode == "Spell & Grammar":
-        user_input = f"<text>{text}</text>"
+        user_input = f"only correct spelling mistakes and grammatical errors in this: <text>{text}</text>"
     elif mode == "Email":
         user_input = text
     elif mode == "LaTeX":
-        user_input = text
+        user_input = f" give tables and figures in LaTeX for only the text in this text. Donot assume anythig, Do not explain anything. : <text>{text}</text>" 
     else:
         user_input = text
 
@@ -155,6 +152,8 @@ def generate_writing_assist(*, text: str, mode: str) -> str:
 
 
 def generate_rag_answer(*, query: str, context: str) -> str:
+    from guardrails import validate_rag_answer
+
     system = (
         "You are a document QA assistant. You answer questions using ONLY the provided document excerpts.\n\n"
         "FORMAT YOUR ANSWER LIKE THIS:\n"
@@ -163,9 +162,16 @@ def generate_rag_answer(*, query: str, context: str) -> str:
         "At the end, add a References section listing all cited sources.\n\n"
         "STRICT RULES:\n"
         "- Use ONLY facts from the provided excerpts. Never invent information.\n"
+        
+        
+        "- If the question is NOT related to the excerpts, reply:\n"
+        "  'The uploaded documents do not contain information about this topic.'\n"
+
         "- Keep answers concise: 3-6 sentences.\n"
         "- Do NOT output raw chunk text. Synthesize and summarize.\n"
-        "- Do NOT list chunk numbers or say 'Chunk 1 says...'.\n\n"
+        
+        "- Do NOT list chunk numbers or say 'Chunk 1 says...'.\n"
+        "- If the excerpts do not contain enough information to answer, say so honestly.\n\n"
         "EXAMPLE OUTPUT:\n"
         "Backdoor attacks inject hidden triggers into training data (paper.pdf, p. 2). "
         "Two main types exist: poison-label and clean-label attacks (paper.pdf, p. 4).\n\n"
@@ -174,5 +180,25 @@ def generate_rag_answer(*, query: str, context: str) -> str:
         "- paper.pdf, p. 4"
     )
     user = f"{context}\n\n---\nQuestion: {query}"
-    return _chat_generate(system, user, max_new_tokens=400)
-
+    # raw = _chat_generate(system, user, max_new_tokens=400)
+    # ok, _reason = validate_rag_answer(query=query, context=context, answer=raw)
+    # if not ok:
+    #     return WEAK_ANSWER_FALLBACK
+    # return raw
+    answer = _chat_generate(system, user, max_new_tokens=400)
+    from guardrails import validate_rag_answer
+    if not validate_rag_answer(answer, context, query):
+        strict_system = (
+            "You are a document QA assistant. Answer the question using ONLY the "
+            "provided excerpts. If the excerpts do not contain sufficient information, "
+            "reply: 'The uploaded documents do not contain enough information to answer "
+            "this question.' Do NOT invent facts."
+        )
+        answer = _chat_generate(strict_system, user, max_new_tokens=400)
+        if not validate_rag_answer(answer, context, query):
+            return (
+                "The uploaded documents do not contain enough relevant information "
+                "to answer this question reliably. Please try rephrasing or upload "
+                "additional documents."
+            )
+    return answer
