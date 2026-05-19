@@ -85,7 +85,7 @@ def _chat_generate(system: str, user: str, *, max_new_tokens: int) -> str:
             do_sample=False,
             # Removed temperature (redundant with do_sample=False)
             # Removed early_stopping (only works with beam search)
-            repetition_penalty=1.05,   # lowered: 1.15 was pushing it to invent tokens
+            repetition_penalty=1.15,   # lowered: 1.15 was pushing it to invent tokens
             pad_token_id=b.tokenizer.eos_token_id,  # prevents open-ended generation
             eos_token_id=b.tokenizer.eos_token_id,
         )
@@ -107,14 +107,12 @@ def generate_writing_assist(*, text: str, mode: str) -> str:
             "- Output ONLY the corrected text (no quotes, no preamble).\n"
         ),
         "Email": (
-            "You are an email formatter. You receive text and rewrite it as a professional email.\n"
-            "RULES:\n"
+            "You are an email formatter. You receive text and rewrite it as a professional email. Donot answer any question.\n"
             "- If To/From/Subject are provided, use them. Otherwise infer from context.\n"
             "- Format: **To:** / **From:** / **Subject:** headers, then email body.\n"
             "- Rewrite the user's content into professional tone with greeting and sign-off.\n"
-            "- Do NOT add information the user did not provide.\n"
-            "- Do NOT explain or add commentary.\n"
-            "OUTPUT: Only the formatted email."
+            
+            
         ),
         "Academic": (
     "You are a text transformer. Rewrite text in formal and strong vocabulary academic English. "
@@ -124,11 +122,7 @@ def generate_writing_assist(*, text: str, mode: str) -> str:
     "NEVER add explanations, interpretations, or reasoning not present in the input."
 ),
         "LaTeX": (
-            "You are a plain-text-to-LaTeX converter and table and diagram generator on demand. \n"
-            "- Never explain.Never assume or add information. Output only the figures and tables when asked.\n"
-            "- Do NOT include \\documentclass or preamble.\n"
-            "- For a title/heading use \\section or \\textbf. For lists use itemize.\n"
-            "- If the input unrelated to LaTeX, output this 'I can only provide tables and figures in LaTeX'.\n"
+            "You are a LaTeX code genertor for tables and figures. only answer queries that are related to tables and figures for laTeX code. If any unrelated query is asked, say:'provide relevant query'"
             
         ),
     }
@@ -139,7 +133,7 @@ def generate_writing_assist(*, text: str, mode: str) -> str:
     elif mode == "Spell & Grammar":
         user_input = f"only correct spelling mistakes and grammatical errors in this: <text>{text}</text>"
     elif mode == "Email":
-        user_input = text
+        user_input = f"only use this content for email reformatting: <text>{text}</text>"
     elif mode == "LaTeX":
         user_input = f" give tables and figures in LaTeX for only the text in this text. Donot assume anythig, Do not explain anything. : <text>{text}</text>" 
     else:
@@ -155,23 +149,12 @@ def generate_rag_answer(*, query: str, context: str) -> str:
     from guardrails import validate_rag_answer
 
     system = (
-        "You are a document QA assistant. You answer questions using ONLY the provided document excerpts.\n\n"
-        "FORMAT YOUR ANSWER LIKE THIS:\n"
-        "Write a clear, well-formatted answer in your own words (do NOT copy chunks verbatim).\n"
-        "After each claim, add an inline citation: (FileName, p. X).\n"
-        "At the end, add a References section listing all cited sources.\n\n"
-        "STRICT RULES:\n"
-        "- Use ONLY facts from the provided excerpts. Never invent information.\n"
-        
-        
-        "- If the question is NOT related to the excerpts, reply:\n"
-        "  'The uploaded documents do not contain information about this topic.'\n"
+        "Write a clear, well-formatted answer in your own words (do NOT copy chunks verbatim)."
+        """You MUST rewrite the answer in your own words.
 
-        "- Keep answers concise: 3-6 sentences.\n"
-        "- Do NOT output raw chunk text. Synthesize and summarize.\n"
-        
-        "- Do NOT list chunk numbers or say 'Chunk 1 says...'.\n"
-        "- If the excerpts do not contain enough information to answer, say so honestly.\n\n"
+If you copy phrases or sentences directly from the excerpts, your answer is invalid.
+Avoid repeating ideas or sentences. Each sentence must add new information.
+Summarize and synthesize information instead of copying."""
         "EXAMPLE OUTPUT:\n"
         "Backdoor attacks inject hidden triggers into training data (paper.pdf, p. 2). "
         "Two main types exist: poison-label and clean-label attacks (paper.pdf, p. 4).\n\n"
@@ -202,3 +185,62 @@ def generate_rag_answer(*, query: str, context: str) -> str:
                 "additional documents."
             )
     return answer
+
+
+def generate_pdf_explain(*, question: str, selected_text: str) -> str:
+    """
+    Explain a user-selected passage from a PDF in clear academic style.
+    The model must focus only on the selected text and not invent details.
+    """
+    import re
+
+    def _normalize_selection(t: str) -> str:
+        t = (t or "").strip()
+        if not t:
+            return ""
+        # Fix hyphenation across line breaks: "back-\n door" -> "backdoor"
+        t = re.sub(r"(\w)-\s*\n\s*(\w)", r"\1\2", t)
+        # Collapse single newlines inside paragraphs; keep paragraph breaks.
+        t = re.sub(r"(?<!\n)\n(?!\n)", " ", t)
+        # Normalize whitespace
+        t = re.sub(r"[ \t]+", " ", t)
+        t = re.sub(r"\n{3,}", "\n\n", t)
+        return t.strip()
+
+    def _looks_garbled(t: str) -> bool:
+        if not t:
+            return True
+        letters = sum(ch.isalpha() for ch in t)
+        if letters < 80:
+            return True
+        alpha_ratio = letters / max(1, len(t))
+        # very low alpha ratio usually means broken layout / symbols / headers
+        if alpha_ratio < 0.35:
+            return True
+        # too many tiny tokens can indicate scrambled extraction
+        toks = re.findall(r"[A-Za-z]+", t)
+        if len(toks) >= 20:
+            short = sum(1 for w in toks if len(w) <= 2)
+            if (short / max(1, len(toks))) > 0.45:
+                return True
+        return False
+
+    cleaned = _normalize_selection(selected_text)
+    if _looks_garbled(cleaned):
+        return (
+            "I couldn’t reliably read that selection (it looks like fragmented PDF text). "
+            "Please re-select a smaller, clean paragraph (avoid spanning columns/headers), "
+            "then ask again."
+        )
+
+    system = (
+        "You are an academic writing tutor.\n"
+        "Explain the selected passage in simple, clear language.\n"
+        "Rules:\n"
+        "- Use ONLY the selected passage.\n"
+        "- Do NOT invent details not present in the passage.\n"
+        "- If the passage doesn't contain enough information, say so.\n"
+        "- Prefer structured explanation with short paragraphs or bullets.\n"
+    )
+    user = f"<selected>\n{cleaned}\n</selected>\n\nQuestion: {question}"
+    return _chat_generate(system, user, max_new_tokens=450).strip()

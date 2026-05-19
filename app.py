@@ -30,13 +30,20 @@ from thread_manager import (
     llm_in,
     llm_out,
     next_task_id,
+    pdf_in,
+    pdf_out,
     spell_in,
     spell_out,
     start_workers,
 )
 
 from guardrails import filter_rag_contexts
+from config_manager import APP_DIR
+from pdf_view_tab import PdfTab
 
+MAX_PDF_SELECTION_CHARS = 2000
+CHAT_PADX_FULL = 60
+CHAT_PADX_SPLIT = 18
 ctk.set_default_color_theme("green")
 
 
@@ -103,7 +110,7 @@ class App(ctk.CTk):
 
         self.colors = DARK if self.settings.theme == "dark" else LIGHT
 
-        self.title("Spell & Grammar Check")
+        self.title("Scriptify")
         self.minsize(1100, 780)
 
         # Open maximized covering the entire screen
@@ -139,6 +146,13 @@ class App(ctk.CTk):
         self._send_spin_phase = 0
         self._send_spinning = False
         self._pending_rag_sources: Optional[str] = None
+        self._view = "chat"  # "chat" | "pdf"
+        self._pdf_pending_id: Optional[float] = None
+        self._pdf_open_doc_id: Optional[str] = None
+        self._pdf_open_path: Optional[str] = None
+        self._pending_pdf_selection: Optional[str] = None
+        self._pending_pdf_question: Optional[str] = None
+        self._pdf_has_open_doc = False
 
         self._checker = SpellGrammarChecker()
         start_workers(spell_checker=self._checker)
@@ -156,6 +170,7 @@ class App(ctk.CTk):
         self._poll_llm_results()
         self._poll_spell_results()
         self._poll_index_results()
+        self._poll_pdf_results()
 
         self.after(150, lambda: self._text.focus_set())
 
@@ -202,8 +217,8 @@ class App(ctk.CTk):
         self.sidebar_toggle.grid(row=0, column=0, padx=(10, 0), pady=11, sticky="w")
 
         self.brand = ctk.CTkLabel(
-            self.sidebar_top, text="Spell & Grammar",
-            font=ctk.CTkFont(size=15, weight="bold"),
+            self.sidebar_top, text="Scriptify",
+            font=ctk.CTkFont(size=18, weight="bold"),
             text_color=self.colors["header_text"])
         self.brand.grid(row=0, column=1, padx=(8, 0), pady=11, sticky="w")
 
@@ -216,7 +231,7 @@ class App(ctk.CTk):
         self.sidebar_content = ctk.CTkFrame(self.sidebar, corner_radius=0, fg_color="transparent")
         self.sidebar_content.grid(row=2, column=0, sticky="nsew", padx=8, pady=(10, 0))
         self.sidebar_content.grid_columnconfigure(0, weight=1)
-        self.sidebar_content.grid_rowconfigure(5, weight=1)
+        self.sidebar_content.grid_rowconfigure(6, weight=1)
 
         self.new_chat_btn = ctk.CTkButton(
             self.sidebar_content,
@@ -229,6 +244,20 @@ class App(ctk.CTk):
         )
         self.new_chat_btn.grid(row=0, column=0, padx=8, pady=(2, 8), sticky="ew")
 
+        self.sidebar_upload_btn = ctk.CTkButton(
+            self.sidebar_content,
+            text="Upload documents",
+            height=34,
+            corner_radius=10,
+            fg_color="transparent",
+            border_width=1,
+            border_color=self.colors["border"],
+            text_color=self.colors["text"],
+            hover_color=self._shade(self.colors["bg"], 0.06),
+            command=self._upload_files,
+        )
+        self.sidebar_upload_btn.grid(row=1, column=0, padx=8, pady=(0, 10), sticky="ew")
+
         self.history_limit_btn = ctk.CTkButton(
             self.sidebar_content,
             text=f"Prompt limit: {self.settings.history_keep_messages}",
@@ -238,17 +267,17 @@ class App(ctk.CTk):
             hover_color=self._shade(self.colors["bg"], 0.06),
             command=self._set_history_limit,
         )
-        self.history_limit_btn.grid(row=1, column=0, padx=8, pady=(0, 10), sticky="ew")
+        self.history_limit_btn.grid(row=2, column=0, padx=8, pady=(0, 10), sticky="ew")
 
         # Doc Q&A uploaded documents — hidden until files are actually uploaded
         self.docs_label = ctk.CTkLabel(self.sidebar_content, text="Uploaded Documents",
                                        text_color=self.colors["muted"],
                                        font=ctk.CTkFont(size=12))
-        self.docs_label.grid(row=2, column=0, padx=10, pady=(0, 0), sticky="w")
+        self.docs_label.grid(row=3, column=0, padx=10, pady=(0, 0), sticky="w")
         self.docs_label.grid_remove()
 
         self.docs_frame = ctk.CTkFrame(self.sidebar_content, corner_radius=0, fg_color="transparent")
-        self.docs_frame.grid(row=3, column=0, padx=8, pady=(0, 0), sticky="ew")
+        self.docs_frame.grid(row=4, column=0, padx=8, pady=(0, 0), sticky="ew")
         self.docs_frame.grid_columnconfigure(0, weight=1)
         self.docs_frame.grid_remove()
 
@@ -256,11 +285,11 @@ class App(ctk.CTk):
             self.sidebar_content, text="Chats",
             text_color=self.colors["muted"],
             font=ctk.CTkFont(size=12))
-        self.chats_heading.grid(row=4, column=0, padx=10, pady=(4, 2), sticky="w")
+        self.chats_heading.grid(row=5, column=0, padx=10, pady=(2, 2), sticky="w")
 
         self.sessions_frame = ctk.CTkScrollableFrame(
             self.sidebar_content, corner_radius=0, border_width=0)
-        self.sessions_frame.grid(row=5, column=0, padx=0, pady=(0, 0), sticky="nsew")
+        self.sessions_frame.grid(row=6, column=0, padx=0, pady=(0, 0), sticky="nsew")
         self.sessions_frame.grid_columnconfigure(0, weight=1)
 
         # Main panel
@@ -307,6 +336,19 @@ class App(ctk.CTk):
             b.grid(row=0, column=i, padx=1)
             self.mode_buttons[m] = b
 
+        self.pdf_tab_btn = ctk.CTkButton(
+            self.mode_bar,
+            text="PDF",
+            width=54,
+            height=30,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color="#333333",
+            text_color=self.colors["header_text"],
+            command=self._toggle_pdf_view,
+        )
+        self.pdf_tab_btn.grid(row=0, column=5, padx=(6, 0), pady=0, sticky="w")
+
         # Top-right controls
         self.font_menu = ctk.CTkOptionMenu(
             self.header,
@@ -349,13 +391,35 @@ class App(ctk.CTk):
         self.thread.grid_rowconfigure(0, weight=1)
         self.thread.grid_columnconfigure(0, weight=1)
 
+        # Split view container (PDF left + chat right). We only add the PDF pane
+        # when the user explicitly opens a PDF and switches to the PDF view.
+        self.thread_pane = tk.PanedWindow(self.thread, orient="horizontal", sashwidth=6, bd=0, bg=self.colors["chat_panel"])
+        self.thread_pane.grid(row=0, column=0, sticky="nsew")
+
+        self.pdf_view = PdfTab(
+            self.thread_pane,
+            colors=self.colors,
+            font_family=self.settings.font_family,
+            font_size=self.settings.font_size,
+            on_toggle_collapse=self._toggle_pdf_collapse,
+        )
+
+        # PanedWindow can only add direct children; wrap chat in a plain container.
+        self.chat_pane = ctk.CTkFrame(self.thread_pane, corner_radius=0, fg_color="transparent")
+        self.chat_pane.grid_rowconfigure(0, weight=1)
+        self.chat_pane.grid_columnconfigure(0, weight=1)
+
         # Centered conversation column like ChatGPT
-        self.chat = ctk.CTkScrollableFrame(self.thread, corner_radius=0)
+        self.chat = ctk.CTkScrollableFrame(self.chat_pane, corner_radius=0)
         self.chat.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
         self.chat.grid_columnconfigure(0, weight=1)
 
+        # Add only chat pane by default (no PDF pane until a PDF is opened).
+        self.thread_pane.add(self.chat_pane, minsize=420)
+        self._pdf_collapsed = False
+
         self.chat_inner = ctk.CTkFrame(self.chat, corner_radius=0, fg_color="transparent")
-        self.chat_inner.grid(row=0, column=0, padx=60, pady=(10, 4), sticky="ew")
+        self.chat_inner.grid(row=0, column=0, padx=CHAT_PADX_FULL, pady=(10, 4), sticky="ew")
         self.chat_inner.grid_columnconfigure(0, weight=1)
 
         # Session title inside messages pane (above messages)
@@ -437,6 +501,8 @@ class App(ctk.CTk):
         self._set_mode("Spell & Grammar")
 
         self._attach_tooltips()
+
+        # PDF view now lives inside thread_pane; no extra grid setup here.
 
     # ---------- theme / style ----------
     def _apply_theme(self):
@@ -790,6 +856,143 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def _toggle_pdf_view(self):
+        if self._view == "pdf":
+            self._show_chat_view()
+        else:
+            self._show_pdf_view()
+
+    def _show_pdf_view(self):
+        self._view = "pdf"
+        if not getattr(self, "_pdf_has_open_doc", False):
+            self._show_toast("Open a PDF from Uploaded Documents first.", duration_ms=4500)
+            # Keep the PDF button visually selected, but don't show the PDF pane yet.
+            # This matches "tab selected" behavior while still requiring an opened PDF to display.
+            self._remove_pdf_pane()
+            self._refresh_topbar_selection()
+            return
+        self._ensure_pdf_pane()
+        self._pdf_collapsed = False
+        self._apply_pdf_collapse_state()
+        self._refresh_topbar_selection()
+
+    def _show_chat_view(self):
+        self._view = "chat"
+        self._remove_pdf_pane()
+        self._refresh_topbar_selection()
+
+    def _refresh_topbar_selection(self):
+        """Topbar selection state: either a mode is active OR PDF view is active."""
+        is_pdf = (getattr(self, "_view", "chat") == "pdf")
+        for m, b in self.mode_buttons.items():
+            try:
+                if (not is_pdf) and (m == self._mode):
+                    b.configure(
+                        fg_color=self.colors["pill_active"],
+                        border_width=1,
+                        border_color=self.colors["pill_border"],
+                        text_color=self.colors["header_text"],
+                    )
+                else:
+                    b.configure(
+                        fg_color="transparent",
+                        border_width=0,
+                        border_color=self.colors["header"],  # effectively hidden
+                        text_color=self.colors["header_text"],
+                    )
+            except Exception:
+                pass
+        try:
+            if is_pdf:
+                self.pdf_tab_btn.configure(
+                    fg_color=self.colors["pill_active"],
+                    border_width=1,
+                    border_color=self.colors["pill_border"],
+                    text_color=self.colors["header_text"],
+                )
+            else:
+                self.pdf_tab_btn.configure(
+                    fg_color="transparent",
+                    border_width=0,
+                    border_color=self.colors["header"],  # effectively hidden
+                    text_color=self.colors["header_text"],
+                )
+        except Exception:
+            pass
+
+    def _toggle_pdf_collapse(self):
+        self._pdf_collapsed = not getattr(self, "_pdf_collapsed", False)
+        self._apply_pdf_collapse_state()
+
+    def _apply_pdf_collapse_state(self):
+        try:
+            if not self._pane_has_pdf():
+                return
+            if getattr(self, "_pdf_collapsed", False):
+                # collapse PDF pane almost fully
+                self.thread_pane.sash_place(0, 6, 0)
+            else:
+                # equal split by default
+                self.update_idletasks()
+                w = int(self.thread_pane.winfo_width() or 880)
+                self.thread_pane.sash_place(0, max(220, w // 2), 0)
+        except Exception:
+            pass
+
+    def _pane_has_pdf(self) -> bool:
+        try:
+            panes = self.thread_pane.panes()
+            return bool(panes) and (str(self.pdf_view) in panes)
+        except Exception:
+            return False
+
+    def _ensure_pdf_pane(self):
+        # Always enforce order: PDF (left) then chat (right).
+        try:
+            for p in list(self.thread_pane.panes() or []):
+                try:
+                    self.thread_pane.forget(p)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            self.thread_pane.add(self.pdf_view, minsize=220)
+            self.thread_pane.add(self.chat_pane, minsize=420)
+        except Exception:
+            # If rebuild fails, try at least adding PDF.
+            try:
+                if not self._pane_has_pdf():
+                    self.thread_pane.add(self.pdf_view, minsize=220)
+            except Exception:
+                pass
+        try:
+            self.chat_inner.grid_configure(padx=CHAT_PADX_SPLIT)
+        except Exception:
+            pass
+        try:
+            self.update_idletasks()
+            w = int(self.thread_pane.winfo_width() or 880)
+            self.thread_pane.sash_place(0, max(220, w // 2), 0)
+        except Exception:
+            pass
+
+    def _remove_pdf_pane(self):
+        try:
+            # Rebuild to chat-only
+            for p in list(self.thread_pane.panes() or []):
+                try:
+                    self.thread_pane.forget(p)
+                except Exception:
+                    pass
+            self.thread_pane.add(self.chat_pane, minsize=420)
+        except Exception:
+            pass
+        try:
+            self.chat_inner.grid_configure(padx=CHAT_PADX_FULL)
+        except Exception:
+            pass
+
     def _clear_chat(self):
         self.messages = []
         self._clear_chat_ui()
@@ -903,9 +1106,20 @@ class App(ctk.CTk):
         except Exception:
             pass
         self._rerender_messages()
+        try:
+            self.pdf_view.set_font(font_family=self.settings.font_family, font_size=self.settings.font_size)
+        except Exception:
+            pass
         self._update_placeholder_visibility()
 
     def _set_mode(self, mode: str):
+        # PDF pane should only show in the PDF view.
+        # Switching modes always returns to chat view.
+        try:
+            if getattr(self, "_view", "chat") == "pdf":
+                self._show_chat_view()
+        except Exception:
+            pass
         self._mode = mode
         if mode == "Doc Q&A":
             self.upload_btn.grid()
@@ -913,14 +1127,7 @@ class App(ctk.CTk):
             self.upload_btn.grid_remove()
         self._refresh_docs_sidebar()
         self._set_placeholder(refresh_only=False)
-        for m, b in self.mode_buttons.items():
-            if m == mode:
-                b.configure(fg_color=self.colors["pill_active"],
-                            border_width=1,
-                            border_color=self.colors["pill_border"])
-            else:
-                b.configure(fg_color="transparent", border_width=0)
-            b.configure(text_color=self.colors["header_text"])
+        self._refresh_topbar_selection()
         self._update_send_enabled()
 
     def _on_mode_changed(self):
@@ -1074,6 +1281,44 @@ class App(ctk.CTk):
             return
 
         mode = self._mode
+
+        # If the PDF view is active and the user has selected text,
+        # answer the question using ONLY the selection as context.
+        if self._view == "pdf":
+            selected = ""
+            try:
+                selected = self.pdf_view.get_selected_text()
+            except Exception:
+                selected = ""
+            if selected:
+                if len(selected) > MAX_PDF_SELECTION_CHARS:
+                    self._show_toast(
+                        f"Selection too long ({len(selected)} chars). Please select a shorter passage (max {MAX_PDF_SELECTION_CHARS}).",
+                        duration_ms=6000,
+                    )
+                    return
+                if self.session_title == "New chat":
+                    self.session_title = derive_title_from_text(text)
+                    self.session_id = new_session_id(self.session_title)
+                    self._active_session_id = self.session_id
+                    self._load_sidebar_sessions()
+                    self._refresh_header_title()
+
+                self._add_message(role="user", content=text, mode=mode, ts=time.time(), persist=True)
+                self.input.delete("1.0", "end")
+                self._update_placeholder_visibility()
+
+                tid = next_task_id()
+                self._pending_task_id = tid
+                self._pending_mode = mode
+                self._pending_widget = self._add_pending_message()
+                self._update_send_enabled()
+
+                ctx = (
+                    f"{selected}"
+                )
+                llm_in.put(LlmTask(kind="pdf", text=text, mode=mode, context=ctx, task_id=tid))
+                return
 
         if mode == "Email":
             to_d = ctk.CTkInputDialog(text="Recipient (To):", title="Email details")
@@ -1323,8 +1568,6 @@ class App(ctk.CTk):
             self._text.tag_add(tag, start, end)
 
     def _upload_files(self):
-        if self._mode != "Doc Q&A":
-            return
         paths = filedialog.askopenfilenames(
             title="Select documents",
             filetypes=[("Documents", "*.pdf;*.docx;*.doc"), ("PDF files", "*.pdf"),
@@ -1374,6 +1617,32 @@ class App(ctk.CTk):
             pass
         self.after(250, self._poll_index_results)
 
+    def _poll_pdf_results(self):
+        try:
+            while True:
+                r = pdf_out.get_nowait()
+                rid = r.get("id")
+                if self._pdf_pending_id is None or rid != self._pdf_pending_id:
+                    continue
+                self._pdf_pending_id = None
+                if not r.get("ok"):
+                    try:
+                        self.pdf_view.show_error(title=r.get("title") or "PDF", error=r.get("error", "Unknown error"))
+                    except Exception:
+                        pass
+                    continue
+                try:
+                    self.pdf_view.set_pdf_text(
+                        path=r.get("path", ""),
+                        title=r.get("title", ""),
+                        text=r.get("text", ""),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self.after(200, self._poll_pdf_results)
+
     def _dismiss_index_toast(self):
         if hasattr(self, "_index_toast") and self._index_toast:
             self._dismiss_toast(self._index_toast)
@@ -1404,7 +1673,7 @@ class App(ctk.CTk):
                 hover_color=self._shade(self.colors["bg"], 0.08),
                 text_color=self.colors["text"],
                 font=ctk.CTkFont(size=13),
-                command=lambda d=doc_id: self._select_doc(d))
+                command=lambda d=doc_id: self._open_doc_in_pdf(d))
             btn.grid(row=0, column=0, sticky="ew")
             info["button"] = btn
 
@@ -1448,6 +1717,40 @@ class App(ctk.CTk):
     def _select_doc(self, doc_id: str):
         self._active_doc_id = doc_id
         self._highlight_active_doc()
+
+    def _open_doc_in_pdf(self, doc_id: str):
+        self._select_doc(doc_id)
+        try:
+            info = self._doc_items.get(doc_id) or {}
+            name = info.get("name") or ""
+        except Exception:
+            name = ""
+
+        if not name:
+            self._show_toast("Could not determine document name.", duration_ms=5000)
+            return
+
+        path = str(APP_DIR / "uploads" / name)
+        if not name.lower().endswith(".pdf"):
+            self._show_pdf_view()
+            try:
+                self.pdf_view.show_error(title=name, error="Only PDF files can be opened in the PDF tab.")
+            except Exception:
+                pass
+            return
+
+        self._show_pdf_view()
+        try:
+            self.pdf_view.open_pdf(path=path, title=name)
+            self._pdf_has_open_doc = True
+            self._ensure_pdf_pane()
+            self._pdf_collapsed = False
+            self._apply_pdf_collapse_state()
+        except Exception as exc:
+            try:
+                self.pdf_view.show_error(title=name, error=str(exc))
+            except Exception:
+                pass
 
     def _highlight_active_doc(self):
         for did, info in self._doc_items.items():
