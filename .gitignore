@@ -3,3 +3,7 @@ __pycache__/
 *.pyc
 .env
 model/
+RAG/chroma_db/
+RAG/*.pdf
+*.bin
+chroma.sqlite3
